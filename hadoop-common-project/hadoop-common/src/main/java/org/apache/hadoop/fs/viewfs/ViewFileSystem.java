@@ -44,6 +44,7 @@ import java.util.Objects;
 import java.util.Set;
 
 import com.google.common.base.Preconditions;
+import java.util.function.Function;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -67,6 +68,7 @@ import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.fs.QuotaUsage;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.XAttrSetFlag;
+import org.apache.hadoop.fs.impl.FunctionsRaisingIOE.FunctionRaisingIOE;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.AclUtil;
@@ -282,7 +284,7 @@ public class ViewFileSystem extends FileSystem {
     enableInnerCache = config.getBoolean(CONFIG_VIEWFS_ENABLE_INNER_CACHE,
         CONFIG_VIEWFS_ENABLE_INNER_CACHE_DEFAULT);
     FsGetter fsGetter = fsGetter();
-    final InnerCache innerCache = new InnerCache(fsGetter);
+    cache = new InnerCache(fsGetter);
     // Now build  client side view (i.e. client side mount table) from config.
     final String authority = theUri.getAuthority();
     String tableName = authority;
@@ -298,15 +300,26 @@ public class ViewFileSystem extends FileSystem {
       fsState = new InodeTree<FileSystem>(conf, tableName, myUri,
           initingUriAsFallbackOnNoMounts) {
         @Override
-        protected FileSystem getTargetFileSystem(final URI uri)
-          throws URISyntaxException, IOException {
-            FileSystem fs;
-            if (enableInnerCache) {
-              fs = innerCache.get(uri, config);
-            } else {
-              fs = fsGetter.get(uri, config);
+        protected FunctionRaisingIOE<URI, FileSystem>
+        getTargetFileSystemInitFn() {
+          return new FunctionRaisingIOE<URI, FileSystem>() {
+            @Override
+            public FileSystem apply(URI uri) throws IOException {
+              FileSystem fs;
+              try {
+                if (enableInnerCache) {
+                  fs = cache.get(uri, config);
+                } else {
+                  fs = fsGetter.get(uri, config);
+                }
+                return new ChRootedFileSystem(fs, uri);
+              } catch (IOException ex) {
+                LOG.error("Could not initialize underlying FileSystem object"
+                    + " for uri " + uri + "with exception: " + ex.toString());
+                throw ex;
+              }
             }
-            return new ChRootedFileSystem(fs, uri);
+          };
         }
 
         @Override
@@ -329,13 +342,6 @@ public class ViewFileSystem extends FileSystem {
               RenameStrategy.SAME_MOUNTPOINT.toString()));
     } catch (URISyntaxException e) {
       throw new IOException("URISyntax exception: " + theUri);
-    }
-
-    if (enableInnerCache) {
-      // All fs instances are created and cached on startup. The cache is
-      // readonly after the initialize() so the concurrent access of the cache
-      // is safe.
-      cache = innerCache.unmodifiableCache();
     }
   }
 
@@ -855,7 +861,11 @@ public class ViewFileSystem extends FileSystem {
     List<InodeTree.MountPoint<FileSystem>> mountPoints = 
         fsState.getMountPoints();
     for (InodeTree.MountPoint<FileSystem> mount : mountPoints) {
-      mount.target.targetFileSystem.setVerifyChecksum(verifyChecksum);
+      try {
+        mount.target.getTargetFileSystem().setVerifyChecksum(verifyChecksum);
+      } catch (IOException ex) {
+        LOG.error("Could not set verifyChecksum for source path " + mount.src);
+      }
     }
   }
   
@@ -882,6 +892,9 @@ public class ViewFileSystem extends FileSystem {
       return res.targetFileSystem.getDefaultBlockSize(res.remainingPath);
     } catch (FileNotFoundException e) {
       throw new NotInMountpointException(f, "getDefaultBlockSize"); 
+    } catch (IOException e) {
+      throw new RuntimeException("Not able to initialize fs in "
+          + " getDefaultBlockSize for path " + f + " with exception", e);
     }
   }
 
@@ -893,6 +906,9 @@ public class ViewFileSystem extends FileSystem {
       return res.targetFileSystem.getDefaultReplication(res.remainingPath);
     } catch (FileNotFoundException e) {
       throw new NotInMountpointException(f, "getDefaultReplication"); 
+    } catch (IOException e) {
+      throw new RuntimeException("Not able to initialize fs in "
+          + " getDefaultReplication for path " + f + " with exception", e);
     }
   }
 
@@ -926,7 +942,11 @@ public class ViewFileSystem extends FileSystem {
     List<InodeTree.MountPoint<FileSystem>> mountPoints = 
         fsState.getMountPoints();
     for (InodeTree.MountPoint<FileSystem> mount : mountPoints) {
-      mount.target.targetFileSystem.setWriteChecksum(writeChecksum);
+      try {
+        mount.target.getTargetFileSystem().setWriteChecksum(writeChecksum);
+      } catch (IOException ex) {
+        LOG.error("Could not set writeChecksum for source path " + mount.src);
+      }
     }
   }
 
@@ -936,8 +956,13 @@ public class ViewFileSystem extends FileSystem {
         fsState.getMountPoints();
     Set<FileSystem> children = new HashSet<FileSystem>();
     for (InodeTree.MountPoint<FileSystem> mountPoint : mountPoints) {
-      FileSystem targetFs = mountPoint.target.targetFileSystem;
-      children.addAll(Arrays.asList(targetFs.getChildFileSystems()));
+      try {
+        FileSystem targetFs = mountPoint.target.getTargetFileSystem();
+        children.addAll(Arrays.asList(targetFs.getChildFileSystems()));
+      } catch (IOException ex) {
+        LOG.error("Could not add child filesystems "
+            + "for source path " + mountPoint.src);
+      }
     }
 
     if (fsState.isRootInternalDir() && fsState.getRootFallbackLink() != null) {

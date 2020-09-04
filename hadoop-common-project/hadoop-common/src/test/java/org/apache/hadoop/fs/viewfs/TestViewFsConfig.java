@@ -24,6 +24,7 @@ import java.net.URISyntaxException;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
+import org.apache.hadoop.fs.impl.FunctionsRaisingIOE.FunctionRaisingIOE;
 import org.junit.Test;
 
 public class TestViewFsConfig {
@@ -42,7 +43,7 @@ public class TestViewFsConfig {
     new InodeTree<Foo>(conf, null, null, false) {
 
       @Override
-      protected Foo getTargetFileSystem(final URI uri) {
+      protected FunctionRaisingIOE<URI, Foo> getTargetFileSystemInitFn() {
         return null;
       }
 

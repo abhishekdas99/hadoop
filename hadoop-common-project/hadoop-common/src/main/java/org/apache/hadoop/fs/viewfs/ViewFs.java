@@ -59,6 +59,7 @@ import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.UnsupportedFileSystemException;
 import org.apache.hadoop.fs.XAttrSetFlag;
+import org.apache.hadoop.fs.impl.FunctionsRaisingIOE.FunctionRaisingIOE;
 import org.apache.hadoop.fs.local.LocalConfigKeys;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclUtil;
@@ -237,15 +238,27 @@ public class ViewFs extends AbstractFileSystem {
         initingUriAsFallbackOnNoMounts) {
 
       @Override
-      protected AbstractFileSystem getTargetFileSystem(final URI uri)
-        throws URISyntaxException, UnsupportedFileSystemException {
-          String pathString = uri.getPath();
-          if (pathString.isEmpty()) {
-            pathString = "/";
+      protected FunctionRaisingIOE<URI, AbstractFileSystem>
+      getTargetFileSystemInitFn() {
+        return new FunctionRaisingIOE<URI, AbstractFileSystem>() {
+          @Override
+          public AbstractFileSystem apply(URI uri) throws IOException {
+            try {
+              String pathString = uri.getPath();
+              if (pathString.isEmpty()) {
+                pathString = "/";
+              }
+              return new ChRootedFs(
+                  AbstractFileSystem.createFileSystem(uri, config),
+                  new Path(pathString));
+            } catch (URISyntaxException ex) {
+              String err = "Could not initialize underlying FileSystem object"
+                  + " for uri " + uri + "with exception: " + ex.toString();
+              LOG.error(err);
+              throw new IOException(err, ex);
+            }
           }
-          return new ChRootedFs(
-              AbstractFileSystem.createFileSystem(uri, config),
-              new Path(pathString));
+        };
       }
 
       @Override
@@ -682,7 +695,8 @@ public class ViewFs extends AbstractFileSystem {
     List<Token<?>> result = new ArrayList<Token<?>>(initialListSize);
     for ( int i = 0; i < mountPoints.size(); ++i ) {
       List<Token<?>> tokens = 
-        mountPoints.get(i).target.targetFileSystem.getDelegationTokens(renewer);
+          mountPoints.get(i).target.getTargetFileSystem()
+              .getDelegationTokens(renewer);
       if (tokens != null) {
         result.addAll(tokens);
       }

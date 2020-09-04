@@ -37,6 +37,7 @@ import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.UnsupportedFileSystemException;
+import org.apache.hadoop.fs.impl.FunctionsRaisingIOE.FunctionRaisingIOE;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.StringUtils;
 
@@ -243,7 +244,8 @@ abstract class InodeTree<T> {
    */
   static class INodeLink<T> extends INode<T> {
     final URI[] targetDirLinkList;
-    final T targetFileSystem;   // file system object created from the link.
+    private T targetFileSystem;   // file system object created from the link.
+    private FunctionRaisingIOE<URI, T> fileSystemInitFunc;
 
     /**
      * Construct a mergeLink or nfly.
@@ -259,11 +261,13 @@ abstract class InodeTree<T> {
      * Construct a simple link (i.e. not a mergeLink).
      */
     INodeLink(final String pathToNode, final UserGroupInformation aUgi,
-        final T targetFs, final URI aTargetDirLink) {
+        FunctionRaisingIOE<URI, T> fileSystemInitFunc,
+        final URI aTargetDirLink) {
       super(pathToNode, aUgi);
-      targetFileSystem = targetFs;
+      targetFileSystem = null;
       targetDirLinkList = new URI[1];
       targetDirLinkList[0] = aTargetDirLink;
+      this.fileSystemInitFunc = fileSystemInitFunc;
     }
 
     /**
@@ -284,7 +288,20 @@ abstract class InodeTree<T> {
       return false;
     }
 
-    public T getTargetFileSystem() {
+    /**
+     * Gets lazily loaded instance of FileSystem
+     * @return An Initialized instance of T
+     * @throws IOException
+     */
+    public T getTargetFileSystem() throws IOException {
+      if (targetFileSystem != null)
+        return targetFileSystem;
+
+      if (targetDirLinkList.length == 1) {
+        synchronized (this) {
+          targetFileSystem = fileSystemInitFunc.apply(targetDirLinkList[0]);
+        }
+      }
       return targetFileSystem;
     }
   }
@@ -345,7 +362,7 @@ abstract class InodeTree<T> {
     switch (linkType) {
     case SINGLE:
       newLink = new INodeLink<T>(fullPath, aUgi,
-          getTargetFileSystem(new URI(target)), new URI(target));
+          getTargetFileSystemInitFn(), new URI(target));
       break;
     case SINGLE_FALLBACK:
     case MERGE_SLASH:
@@ -371,8 +388,7 @@ abstract class InodeTree<T> {
    * 3 abstract methods.
    * @throws IOException
    */
-  protected abstract T getTargetFileSystem(URI uri)
-      throws UnsupportedFileSystemException, URISyntaxException, IOException;
+  protected abstract FunctionRaisingIOE<URI, T> getTargetFileSystemInitFn();
 
   protected abstract T getTargetFileSystem(INodeDir<T> dir)
       throws URISyntaxException, IOException;
@@ -576,8 +592,7 @@ abstract class InodeTree<T> {
 
     if (isMergeSlashConfigured) {
       Preconditions.checkNotNull(mergeSlashTarget);
-      root = new INodeLink<T>(mountTableName, ugi,
-          getTargetFileSystem(new URI(mergeSlashTarget)),
+      root = new INodeLink<T>(mountTableName, ugi, getTargetFileSystemInitFn(),
           new URI(mergeSlashTarget));
       mountPoints.add(new MountPoint<T>("/", (INodeLink<T>) root));
       rootFallbackLink = null;
@@ -595,8 +610,7 @@ abstract class InodeTree<T> {
                 + "not allowed.");
           }
           fallbackLink = new INodeLink<T>(mountTableName, ugi,
-              getTargetFileSystem(new URI(le.getTarget())),
-              new URI(le.getTarget()));
+              getTargetFileSystemInitFn(), new URI(le.getTarget()));
         } else {
           createLink(le.getSrc(), le.getTarget(), le.getLinkType(),
               le.getSettings(), le.getUgi(), le.getConfig());
@@ -617,9 +631,8 @@ abstract class InodeTree<T> {
           new StringBuilder("Empty mount table detected for ").append(theUri)
               .append(" and considering itself as a linkFallback.");
       FileSystem.LOG.info(msg.toString());
-      rootFallbackLink =
-          new INodeLink<T>(mountTableName, ugi, getTargetFileSystem(theUri),
-              theUri);
+      rootFallbackLink = new INodeLink<T>(mountTableName, ugi,
+          getTargetFileSystemInitFn(), theUri);
       getRootDir().addFallbackLink(rootFallbackLink);
     }
   }
@@ -660,10 +673,10 @@ abstract class InodeTree<T> {
    * @param p - input path
    * @param resolveLastComponent
    * @return ResolveResult which allows further resolution of the remaining path
-   * @throws FileNotFoundException
+   * @throws IOException
    */
   ResolveResult<T> resolve(final String p, final boolean resolveLastComponent)
-      throws FileNotFoundException {
+      throws IOException {
     String[] path = breakIntoPathComponents(p);
     if (path.length <= 1) { // special case for when path is "/"
       T targetFs = root.isInternalDir() ?

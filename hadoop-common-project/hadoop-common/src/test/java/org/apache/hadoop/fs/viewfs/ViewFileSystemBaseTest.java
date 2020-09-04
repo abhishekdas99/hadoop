@@ -1354,6 +1354,8 @@ abstract public class ViewFileSystemBaseTest {
     final int cacheSize = TestFileUtil.getCacheSize();
     ViewFileSystem viewFs = (ViewFileSystem) FileSystem
         .get(new URI("viewfs://" + clusterName + "/"), config);
+    viewFs.resolvePath(
+        new Path(String.format("viewfs://%s/%s", clusterName, "/user")));
     assertEquals(cacheSize + 1, TestFileUtil.getCacheSize());
     viewFs.close();
     assertEquals(cacheSize, TestFileUtil.getCacheSize());
@@ -1429,5 +1431,42 @@ abstract public class ViewFileSystemBaseTest {
           summaryBefore.getLength() + expected.length(),
           summaryAfter.getLength());
     }
+  }
+
+  @Test
+  public void testTargetFileSystemLazyInitialization() throws Exception {
+    final String clusterName = "cluster" + new Random().nextInt();
+    Configuration config = new Configuration(conf);
+    config.setClass("fs.mockfs.impl",
+        TestChRootedFileSystem.MockFileSystem.class, FileSystem.class);
+    ConfigUtil.addLink(config, clusterName, "/user",
+        new Path(targetTestRoot, "user").toUri());
+    ConfigUtil.addLink(config, clusterName,
+        "/mock", URI.create("mockfs://mockauth/mockpath"));
+
+    final int cacheSize = TestFileUtil.getCacheSize();
+    ViewFileSystem viewFs = (ViewFileSystem) FileSystem
+        .get(new URI("viewfs://" + clusterName + "/"), config);
+
+    // As no file system instance has been initialized,
+    // cache size will remain the same
+    assertEquals(cacheSize, TestFileUtil.getCacheSize());
+
+    // This resolve path will initialize the file system corresponding
+    // to the mount table entry of the path "/user"
+    viewFs.resolvePath(
+        new Path(String.format("viewfs://%s/%s", clusterName, "/user")));
+
+    // Cache size will increase by 1.
+    assertEquals(cacheSize + 1, TestFileUtil.getCacheSize());
+    // This resolve path will initialize the file system corresponding
+    // to the mount table entry of the path "/mock"
+    viewFs.resolvePath(new Path(String.format("viewfs://%s/%s", clusterName,
+        "/mock")));
+    // One more file system instance will get initialized.
+    assertEquals(cacheSize + 2, TestFileUtil.getCacheSize());
+    viewFs.close();
+    // Initialized FileSystem instances will be removed from cache.
+    assertEquals(cacheSize, TestFileUtil.getCacheSize());
   }
 }
